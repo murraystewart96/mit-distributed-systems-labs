@@ -35,6 +35,13 @@ type GetTaskReply struct {
 	Task Task
 }
 
+type TaskCompleteArgs struct {
+	Type     Type
+	WorkerID uuid.UUID
+}
+
+type TaskCompleteReply struct{}
+
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.
 // Can't use the current directory since

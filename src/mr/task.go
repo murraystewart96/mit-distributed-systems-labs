@@ -11,7 +11,7 @@ const (
 	REDUCE
 
 	// Task states
-	IDLE = iota
+	IDLE State = iota
 	ACTIVE
 	COMPLETED
 )

@@ -18,16 +18,21 @@ const (
 
 type Coordinator struct {
 	// Your definitions here.
-	mapTasks    []*Task // maybe have two queue - one for idle and one for active
-	reduceTasks []*Task
+	idleMapTasks        []*Task // maybe have two queue - one for idle and one for active
+	activeMapTask       map[uuid.UUID]*Task
+	totalMapTasks       int
+	numCompleteMapTasks int
 
-	activeTasks map[uuid.UUID]*Task // Can always loop through array if this doesn't work out
-
-	numCompleteMapTasks    int
+	idleReduceTasks        []*Task
+	activeReduceTask       map[uuid.UUID]*Task
+	totalReduceTasks       int
 	numCompleteReduceTasks int
 
 	doneTaskChans map[uuid.UUID]chan struct{}
-	mu            sync.RWMutex
+	jobComplete   bool
+
+	mu   *sync.RWMutex
+	cond *sync.Cond
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -37,25 +42,41 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	c.doneTaskChans[args.WorkerID] = make(chan struct{})
 
 	// Assign map task if any map tasks are remaining
-	if c.numCompleteMapTasks < len(c.mapTasks) {
-		// Look for idle map task to assign
-		for i, mapTask := range c.mapTasks {
-			if mapTask.State == IDLE {
-				// Assign task
-				reply.Task = *mapTask
 
-				// Mark task as active
-				mapTask.State = ACTIVE
-				mapTask.WorkerID = args.WorkerID
-				c.activeTasks[args.WorkerID] = mapTask
+	c.mu.Lock()
+	switch {
+	case len(c.idleMapTasks) > 0:
+		// Assign task
+		mapTask := c.idleMapTasks[len(c.idleMapTasks)-1]
+		reply.Task = *mapTask
+		c.idleMapTasks = c.idleMapTasks[:len(c.idleMapTasks)-1]
 
-				// Start task timer
-				go func() {
+		// Mark task as active
+		mapTask.State = ACTIVE
+		mapTask.WorkerID = args.WorkerID
+		c.activeMapTask[args.WorkerID] = mapTask
 
-				}()
-			}
-		}
+		// Start task timer
+		go func() {
+
+		}()
+
+	case c.numCompleteMapTasks < c.totalMapTasks:
+		// Waiting for map tasks to complete
+		// sync.cond
+	case len(c.idleReduceTasks) > 0:
+		// Assign task
+
+	case c.numCompleteReduceTasks < c.totalReduceTasks:
+		// Wait for reduce tasks to complete
+
+	default:
+		// Job is done -> exit program
+		c.jobComplete = true
 	}
+
+	c.mu.Unlock()
+	return nil
 
 	// When a worker is deemed to have failed what do we do?
 	// first of all how do we track this?
@@ -72,7 +93,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	// when the task is complete we are done with that channel, we close which signals for the timer routine to stop, then we delete the channel
 	// maybe dont even delete the channel, just assign a new channel every time a worker asks for a task. the old one will be gargage collected
 
-	return nil
+	// when you complete a map task remove it from active
 }
 
 func (c *Coordinator) taskTimer(workerID uuid.UUID) {
@@ -120,31 +141,35 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
-	// Your code here.
-
-	return ret
+	return c.jobComplete
 }
 
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		mu:               &sync.RWMutex{},
+		cond:             &sync.Cond{},
+		totalMapTasks:    len(files),
+		totalReduceTasks: nReduce,
+	}
 
 	// Your code here.
 
 	// Create map tasks from input files
-	c.MapTasks = make([]*Task, len(files))
+	c.idleMapTasks = make([]*Task, len(files))
 	for i, file := range files {
 		task := &Task{
 			Type:      MAP,
 			State:     IDLE,
-			inputFile: file,
+			InputFile: file,
 		}
 
-		c.MapTasks[i] = task
+		c.idleMapTasks[i] = task
 	}
 
 	c.server()

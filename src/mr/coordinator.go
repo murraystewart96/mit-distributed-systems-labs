@@ -57,12 +57,10 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 	case c.numCompleteMapTasks < c.totalMapTasks:
 		// Waiting for all map tasks to complete or failed task to become available
-		for c.numCompleteMapTasks != c.totalMapTasks || len(c.idleMapTasks) != 0 {
+		for c.numCompleteMapTasks != c.totalMapTasks && len(c.idleMapTasks) == 0 {
 			log.Info().Msg("Waiting for MAP tasks to complete")
 			c.cond.Wait()
 		}
-
-		log.Info().Msg("HELLOO!!!!!")
 
 		if len(c.idleMapTasks) > 0 {
 			// Assign map task
@@ -77,7 +75,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 
 	case c.numCompleteReduceTasks < c.totalReduceTasks:
 		// Waiting for all reduce tasks to complete or failed task to become available
-		for c.numCompleteReduceTasks != c.totalReduceTasks || len(c.idleReduceTasks) != 0 {
+		for c.numCompleteReduceTasks != c.totalReduceTasks && len(c.idleReduceTasks) == 0 {
 			log.Info().Msg("Waiting for REDUCE tasks to complete")
 			c.cond.Wait()
 		}

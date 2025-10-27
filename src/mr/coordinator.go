@@ -59,16 +59,24 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		if len(c.idleMapTasks) > 0 {
 			// Assign map task
 			reply.Task = c.assignTask(args.WorkerID, MAP)
-		} else {
+		} else if len(c.idleReduceTasks) > 0 {
 			// All map tasks complete - assign reduce task
 			reply.Task = c.assignTask(args.WorkerID, REDUCE)
 		}
 
 	case len(c.idleReduceTasks) > 0:
-		reply.Task = c.assignTask(args.WorkerID, MAP)
+		reply.Task = c.assignTask(args.WorkerID, REDUCE)
 
 	case c.numCompleteReduceTasks < c.totalReduceTasks:
-		// Wait for reduce tasks to complete
+		// Waiting for all reduce tasks to complete or failed task to become available
+		for c.numCompleteReduceTasks != c.totalReduceTasks || len(c.idleReduceTasks) != 0 {
+			c.cond.Wait()
+		}
+
+		if len(c.idleReduceTasks) > 0 {
+			// Assign reduce task
+			reply.Task = c.assignTask(args.WorkerID, REDUCE)
+		}
 
 	default:
 		// Job is done -> exit program
@@ -89,27 +97,37 @@ func (c *Coordinator) TaskComplete(args *TaskCompleteArgs, reply *TaskCompleteRe
 			return fmt.Errorf("unknown map task completed by worker - %s", args.WorkerID.String())
 		}
 
-		c.numCompleteMapTasks++
 		delete(c.activeMapTask, args.WorkerID)
+
+		c.numCompleteMapTasks++
+		if c.numCompleteMapTasks == c.totalMapTasks {
+			c.cond.Broadcast() // Wake up any waiting GetTask requests
+		}
+
+		// broadcast
 	case REDUCE:
 		_, found := c.activeReduceTask[args.WorkerID]
 		if !found {
 			return fmt.Errorf("unknown reduce task completed by worker - %s", args.WorkerID.String())
 		}
 
-		c.numCompleteReduceTasks++
 		delete(c.activeReduceTask, args.WorkerID)
+
+		c.numCompleteReduceTasks++
+		if c.numCompleteReduceTasks == c.totalReduceTasks {
+			c.cond.Broadcast() // Wake up any waiting GetTask requests
+		}
 	}
 
-	// Terminate task timer
+	// Terminate task timer by closing done channel
 	done := c.doneTaskChans[args.WorkerID]
 	close(done)
+	delete(c.doneTaskChans, args.WorkerID)
 
 	return nil
 }
 
-func (c *Coordinator) taskTimer(task *Task) {
-	done := c.doneTaskChans[task.WorkerID]
+func (c *Coordinator) taskTimer(task *Task, done chan struct{}) {
 	timer := time.NewTimer(taskTimeout)
 
 	for {
@@ -161,7 +179,7 @@ func (c *Coordinator) assignTask(workerID uuid.UUID, taskType Type) Task {
 		c.activeMapTask[workerID] = assignedTask
 
 		// Start task timer
-		go c.taskTimer(assignedTask)
+		go c.taskTimer(assignedTask, c.doneTaskChans[workerID])
 	case REDUCE:
 		// Assign task
 		assignedTask := c.idleReduceTasks[len(c.idleReduceTasks)-1]
@@ -175,7 +193,7 @@ func (c *Coordinator) assignTask(workerID uuid.UUID, taskType Type) Task {
 		c.activeReduceTask[workerID] = assignedTask
 
 		// Start task timer
-		go c.taskTimer(assignedTask)
+		go c.taskTimer(assignedTask, c.doneTaskChans[workerID])
 	}
 
 	return replyTask
@@ -214,6 +232,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		cond:             sync.NewCond(mu),
 		totalMapTasks:    len(files),
 		totalReduceTasks: nReduce,
+		activeMapTask:    make(map[uuid.UUID]*Task),
+		activeReduceTask: map[uuid.UUID]*Task{},
+		doneTaskChans:    make(map[uuid.UUID]chan struct{}),
 	}
 
 	// Your code here.
@@ -222,12 +243,23 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.idleMapTasks = make([]*Task, len(files))
 	for i, file := range files {
 		task := &Task{
+			ID:        i,
 			Type:      MAP,
 			State:     IDLE,
 			InputFile: file,
+			NReduce:   nReduce,
 		}
 
 		c.idleMapTasks[i] = task
+	}
+
+	// Create reduce tasks
+	c.idleReduceTasks = make([]*Task, nReduce)
+	for i := range nReduce {
+		task := &Task{
+			ID:   i,
+			Type: REDUCE,
+		}
 	}
 
 	c.server()

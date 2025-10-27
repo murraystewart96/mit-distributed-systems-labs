@@ -17,8 +17,10 @@ const (
 )
 
 type Task struct {
+	ID        int
 	Type      Type
 	State     State
 	WorkerID  uuid.UUID // for active tasks
 	InputFile string
+	NReduce   int
 }

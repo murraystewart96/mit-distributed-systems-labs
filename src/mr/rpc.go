@@ -32,7 +32,9 @@ type GetTaskArgs struct {
 }
 
 type GetTaskReply struct {
-	Task Task
+	Task    Task
+	NReduce int
+	NMap    int
 }
 
 type TaskCompleteArgs struct {

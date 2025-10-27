@@ -2,7 +2,6 @@ package mr
 
 import (
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -11,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 )
 
 const (
@@ -40,8 +40,13 @@ type Coordinator struct {
 // Your code here -- RPC handlers for the worker to call.
 
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
+	log.Info().Msg("GetTask - coordinator")
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	reply.NMap = c.totalMapTasks
+	reply.NReduce = c.totalReduceTasks
 
 	// Create done channel for task
 	c.doneTaskChans[args.WorkerID] = make(chan struct{})
@@ -53,8 +58,11 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	case c.numCompleteMapTasks < c.totalMapTasks:
 		// Waiting for all map tasks to complete or failed task to become available
 		for c.numCompleteMapTasks != c.totalMapTasks || len(c.idleMapTasks) != 0 {
+			log.Info().Msg("Waiting for MAP tasks to complete")
 			c.cond.Wait()
 		}
+
+		log.Info().Msg("HELLOO!!!!!")
 
 		if len(c.idleMapTasks) > 0 {
 			// Assign map task
@@ -70,6 +78,7 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	case c.numCompleteReduceTasks < c.totalReduceTasks:
 		// Waiting for all reduce tasks to complete or failed task to become available
 		for c.numCompleteReduceTasks != c.totalReduceTasks || len(c.idleReduceTasks) != 0 {
+			log.Info().Msg("Waiting for REDUCE tasks to complete")
 			c.cond.Wait()
 		}
 
@@ -104,7 +113,8 @@ func (c *Coordinator) TaskComplete(args *TaskCompleteArgs, reply *TaskCompleteRe
 			c.cond.Broadcast() // Wake up any waiting GetTask requests
 		}
 
-		// broadcast
+		log.Info().Msgf("MAP task complete")
+
 	case REDUCE:
 		_, found := c.activeReduceTask[args.WorkerID]
 		if !found {
@@ -117,6 +127,8 @@ func (c *Coordinator) TaskComplete(args *TaskCompleteArgs, reply *TaskCompleteRe
 		if c.numCompleteReduceTasks == c.totalReduceTasks {
 			c.cond.Broadcast() // Wake up any waiting GetTask requests
 		}
+
+		log.Info().Msgf("REDUCE task complete")
 	}
 
 	// Terminate task timer by closing done channel
@@ -136,6 +148,8 @@ func (c *Coordinator) taskTimer(task *Task, done chan struct{}) {
 			switch task.Type {
 			case MAP:
 				// Task has timed out - make task available for other workers
+				log.Info().Msg("MAP task timeout - rescheduling task")
+
 				c.mu.Lock()
 				task.State = IDLE
 				c.idleMapTasks = append(c.idleMapTasks, task)
@@ -143,8 +157,12 @@ func (c *Coordinator) taskTimer(task *Task, done chan struct{}) {
 				// Remove failed worker's active task
 				delete(c.activeMapTask, task.WorkerID)
 				c.mu.Unlock()
+
+				c.cond.Broadcast() // Wake up any waiting GetTask requests
 			case REDUCE:
 				// Task has timed out - make task available for other workers
+				log.Info().Msg("REDUCE task timeout - rescheduling task")
+
 				c.mu.Lock()
 				task.State = IDLE
 				c.idleReduceTasks = append(c.idleReduceTasks, task)
@@ -152,6 +170,8 @@ func (c *Coordinator) taskTimer(task *Task, done chan struct{}) {
 				// Remove failed worker's active task
 				delete(c.activeReduceTask, task.WorkerID)
 				c.mu.Unlock()
+
+				c.cond.Broadcast() // Wake up any waiting GetTask requests
 			}
 
 			return
@@ -167,6 +187,8 @@ func (c *Coordinator) assignTask(workerID uuid.UUID, taskType Type) Task {
 
 	switch taskType {
 	case MAP:
+		log.Info().Msg("Assigning MAP task")
+
 		// Assign task
 		assignedTask := c.idleMapTasks[len(c.idleMapTasks)-1]
 		replyTask = *assignedTask
@@ -181,6 +203,8 @@ func (c *Coordinator) assignTask(workerID uuid.UUID, taskType Type) Task {
 		// Start task timer
 		go c.taskTimer(assignedTask, c.doneTaskChans[workerID])
 	case REDUCE:
+		log.Info().Msg("Assigning REDUCE task")
+
 		// Assign task
 		assignedTask := c.idleReduceTasks[len(c.idleReduceTasks)-1]
 		replyTask = *assignedTask
@@ -208,7 +232,7 @@ func (c *Coordinator) server() {
 	os.Remove(sockname)
 	l, e := net.Listen("unix", sockname)
 	if e != nil {
-		log.Fatal("listen error:", e)
+		log.Fatal().Err(e).Msg("listen error")
 	}
 	go http.Serve(l, nil)
 }
@@ -247,7 +271,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 			Type:      MAP,
 			State:     IDLE,
 			InputFile: file,
-			NReduce:   nReduce,
 		}
 
 		c.idleMapTasks[i] = task
@@ -257,9 +280,12 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c.idleReduceTasks = make([]*Task, nReduce)
 	for i := range nReduce {
 		task := &Task{
-			ID:   i,
-			Type: REDUCE,
+			ID:    i,
+			Type:  REDUCE,
+			State: IDLE,
 		}
+
+		c.idleReduceTasks[i] = task
 	}
 
 	c.server()

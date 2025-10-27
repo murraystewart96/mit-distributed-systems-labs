@@ -21,6 +21,5 @@ type Task struct {
 	Type      Type
 	State     State
 	WorkerID  uuid.UUID // for active tasks
-	InputFile string
-	NReduce   int
+	InputFile string    // only used for map tasks
 }

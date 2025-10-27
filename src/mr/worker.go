@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,6 +22,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 // use ihash(key) % NReduce to choose the reduce
 // task number for each KeyValue emitted by Map.
@@ -39,11 +48,13 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 		time.Sleep(TaskInterval)
 
 		// Get Task from coordinator
-		task, err := GetTask(workerID)
+		taskReply, err := GetTask(workerID)
 		if err != nil {
 			fmt.Printf("failed to get task: %s", err.Error())
 			continue
 		}
+
+		task := taskReply.Task
 
 		switch task.Type {
 		case MAP:
@@ -63,10 +74,10 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 			// Create buffered partition encoders
 			encoders := make(map[int]*json.Encoder)
-			files := make([]*os.File, task.NReduce)
-			buffers := make([]*bufio.Writer, task.NReduce)
+			files := make([]*os.File, taskReply.NReduce)
+			buffers := make([]*bufio.Writer, taskReply.NReduce)
 
-			for i := range task.NReduce {
+			for i := range taskReply.NReduce {
 				intFilename := fmt.Sprintf("mr-%d-%d", task.ID, i)
 
 				files[i], err = os.Create(intFilename)
@@ -81,7 +92,7 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 
 			// Partition intermediate values
 			for _, kv := range intKvs {
-				partition := ihash(kv.Key) % task.NReduce
+				partition := ihash(kv.Key) % taskReply.NReduce
 				w := encoders[partition]
 
 				if err := w.Encode(&kv); err != nil {
@@ -90,55 +101,104 @@ func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string)
 			}
 
 			// Flush buffers and close files
-			for i := range task.NReduce {
+			for i := range taskReply.NReduce {
 				buffers[i].Flush()
 				files[i].Close()
 			}
+
+			if err := TaskComplete(workerID, task.Type); err != nil {
+				fmt.Printf("failed to mark task as complete: %s", err.Error())
+			}
+
+		case REDUCE:
+			// Read intermediate files into slice of key values -> sort -> reduce
+			intKvs := []KeyValue{}
+
+			for i := range taskReply.NMap {
+				filename := fmt.Sprintf("mr-%d-%d", i, task.ID)
+				file, err := os.Open(filename)
+				if err != nil {
+					log.Fatalf("cannot open %v", task.InputFile)
+				}
+
+				decoder := json.NewDecoder(file)
+
+				for {
+					kv := KeyValue{}
+					if err := decoder.Decode(&kv); err != nil {
+						if err.Error() == "EOF" {
+							break
+						}
+						fmt.Printf("failed to decode key value: %s", err.Error())
+					}
+
+					intKvs = append(intKvs, kv)
+				}
+
+				file.Close()
+			}
+
+			sort.Sort(ByKey(intKvs))
+
+			oname := fmt.Sprintf("mr-out-%d", task.ID)
+			ofile, err := os.Create(oname)
+			if err != nil {
+				log.Fatalf("cannot create %v", oname)
+			}
+
+			//
+			// call Reduce on each distinct key in intKvs[],
+			// and print the result to mr-out-0.
+			//
+			i := 0
+			for i < len(intKvs) {
+				j := i + 1
+				for j < len(intKvs) && intKvs[j].Key == intKvs[i].Key {
+					j++
+				}
+				values := []string{}
+				for k := i; k < j; k++ {
+					values = append(values, intKvs[k].Value)
+				}
+				output := reducef(intKvs[i].Key, values)
+
+				// this is the correct format for each line of Reduce output.
+				fmt.Fprintf(ofile, "%v %v\n", intKvs[i].Key, output)
+
+				i = j
+			}
+
+			ofile.Close()
+
+			if err := TaskComplete(workerID, task.Type); err != nil {
+				fmt.Printf("failed to mark task as complete: %s", err.Error())
+			}
 		}
 	}
-
-	// uncomment to send the Example RPC to the coordinator.
-	// CallExample()
-
 }
 
-func GetTask(workerID uuid.UUID) (Task, error) {
+func GetTask(workerID uuid.UUID) (GetTaskReply, error) {
 	args := GetTaskArgs{WorkerID: workerID}
 	reply := GetTaskReply{}
 
 	err := call("Coordinator.GetTask", &args, &reply)
 	if err != nil {
-		return Task{}, fmt.Errorf("rpc failed: %w", err)
+		return GetTaskReply{}, fmt.Errorf("rpc failed: %w", err)
 	}
 
-	return reply.Task, nil
+	return reply, nil
 }
 
-// example function to show how to make an RPC call to the coordinator.
-//
-// the RPC argument and reply types are defined in rpc.go.
-func CallExample() {
+func TaskComplete(workerID uuid.UUID, taskType Type) error {
+	args := TaskCompleteArgs{WorkerID: workerID, Type: taskType}
+	reply := TaskCompleteReply{}
 
-	// declare an argument structure.
-	args := ExampleArgs{}
-
-	// fill in the argument(s).
-	args.X = 99
-
-	// declare a reply structure.
-	reply := ExampleReply{}
-
-	// send the RPC request, wait for the reply.
-	// the "Coordinator.Example" tells the
-	// receiving server that we'd like to call
-	// the Example() method of struct Coordinator.
-	err := call("Coordinator.Example", &args, &reply)
+	err := call("Coordinator.TaskComplete", &args, &reply)
 	if err != nil {
-		// reply.Y should be 100.
-		fmt.Printf("reply.Y %v\n", reply.Y)
-	} else {
-		fmt.Printf("call failed!\n")
+		return fmt.Errorf("rpc failed: %w", err)
 	}
+
+	return nil
 }
 
 // send an RPC request to the coordinator, wait for the response.

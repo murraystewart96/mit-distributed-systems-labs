@@ -39,6 +39,8 @@ type Coordinator struct {
 
 // Your code here -- RPC handlers for the worker to call.
 
+// GetTask assigns available tasks to the worker
+// All map tasks must be complete before assigning reduce tasks.
 func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	log.Info().Msg("GetTask - coordinator")
 
@@ -51,22 +53,23 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	// Create done channel for task
 	c.doneTaskChans[args.WorkerID] = make(chan struct{})
 
+	// Assign any available tasks
 	switch {
 	case len(c.idleMapTasks) > 0:
 		reply.Task = c.assignTask(args.WorkerID, MAP)
 
 	case c.numCompleteMapTasks < c.totalMapTasks:
-		// Waiting for all map tasks to complete or failed task to become available
+		// No idle map tasks but not all map tasks are complete
+		// Wait for all map tasks to complete or failed task to become available
 		for c.numCompleteMapTasks != c.totalMapTasks && len(c.idleMapTasks) == 0 {
 			log.Info().Msg("Waiting for MAP tasks to complete")
 			c.cond.Wait()
 		}
 
+		// Assign map task if available or move onto reduce tasks
 		if len(c.idleMapTasks) > 0 {
-			// Assign map task
 			reply.Task = c.assignTask(args.WorkerID, MAP)
 		} else if len(c.idleReduceTasks) > 0 {
-			// All map tasks complete - assign reduce task
 			reply.Task = c.assignTask(args.WorkerID, REDUCE)
 		}
 
@@ -74,18 +77,19 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 		reply.Task = c.assignTask(args.WorkerID, REDUCE)
 
 	case c.numCompleteReduceTasks < c.totalReduceTasks:
-		// Waiting for all reduce tasks to complete or failed task to become available
+		// No idle reduce tasks but not all reduce tasks are complete
+		// Wait for all reduce tasks to complete or failed task to become available
 		for c.numCompleteReduceTasks != c.totalReduceTasks && len(c.idleReduceTasks) == 0 {
 			log.Info().Msg("Waiting for REDUCE tasks to complete")
 			c.cond.Wait()
 		}
 
 		if len(c.idleReduceTasks) > 0 {
-			// Assign reduce task
 			reply.Task = c.assignTask(args.WorkerID, REDUCE)
 		}
 
 	default:
+		// All map and reduce tasks are complete
 		// Job is done -> exit program
 		c.jobComplete = true
 	}
@@ -93,6 +97,10 @@ func (c *Coordinator) GetTask(args *GetTaskArgs, reply *GetTaskReply) error {
 	return nil
 }
 
+// TaskComplete is called by the worker when it has completed its task.
+// - remove the task from active tasks
+// - increment completed task count
+// - close task done channel to stop taskTimer routine
 func (c *Coordinator) TaskComplete(args *TaskCompleteArgs, reply *TaskCompleteReply) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -129,7 +137,7 @@ func (c *Coordinator) TaskComplete(args *TaskCompleteArgs, reply *TaskCompleteRe
 		log.Info().Msgf("REDUCE task complete")
 	}
 
-	// Terminate task timer by closing done channel
+	// Terminate task timer by closing task done channel
 	done := c.doneTaskChans[args.WorkerID]
 	close(done)
 	delete(c.doneTaskChans, args.WorkerID)
@@ -137,6 +145,8 @@ func (c *Coordinator) TaskComplete(args *TaskCompleteArgs, reply *TaskCompleteRe
 	return nil
 }
 
+// taskTimer waits for confirmation that a task has finished.
+// if the task does not finish in time we mark the task as IDLE so other workers can pick it up.
 func (c *Coordinator) taskTimer(task *Task, done chan struct{}) {
 	timer := time.NewTimer(taskTimeout)
 
@@ -248,6 +258,8 @@ func (c *Coordinator) Done() bool {
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
+	// Your code here.
+
 	mu := &sync.RWMutex{}
 	c := Coordinator{
 		mu:               mu,
@@ -258,8 +270,6 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 		activeReduceTask: map[uuid.UUID]*Task{},
 		doneTaskChans:    make(map[uuid.UUID]chan struct{}),
 	}
-
-	// Your code here.
 
 	// Create map tasks from input files
 	c.idleMapTasks = make([]*Task, len(files))

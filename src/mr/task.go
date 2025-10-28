@@ -2,6 +2,8 @@ package mr
 
 import "github.com/google/uuid"
 
+// ***** MY CODE START *****
+
 type Type int
 type State int
 
@@ -23,3 +25,5 @@ type Task struct {
 	WorkerID  uuid.UUID // for active tasks
 	InputFile string    // only used for map tasks
 }
+
+// ***** MY CODE END *****

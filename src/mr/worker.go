@@ -15,14 +15,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const TaskInterval = 1 * time.Second // Interval before asking for next task
-
-// Map functions return a slice of KeyValue.
-type KeyValue struct {
-	Key   string
-	Value string
-}
-
 // for sorting by key.
 type ByKey []KeyValue
 
@@ -37,6 +29,16 @@ func ihash(key string) int {
 	h := fnv.New32a()
 	h.Write([]byte(key))
 	return int(h.Sum32() & 0x7fffffff)
+}
+
+// ***** MY CODE START *****
+
+const TaskInterval = 1 * time.Second // Interval before asking for next task
+
+// Map functions return a slice of KeyValue.
+type KeyValue struct {
+	Key   string
+	Value string
 }
 
 func GetTask(workerID uuid.UUID) (GetTaskReply, error) {
@@ -65,9 +67,10 @@ func TaskComplete(workerID uuid.UUID, taskType Type) error {
 
 // main/mrworker.go calls this function.
 func Worker(mapf func(string, string) []KeyValue, reducef func(string, []string) string) {
+	// Your worker implementation here.
+
 	workerID := uuid.New()
 
-	// Your worker implementation here.
 	for {
 		time.Sleep(TaskInterval) // small sleep as to not hammer the coordinator
 
@@ -223,6 +226,8 @@ func reduceKvs(task *Task, intKvs []KeyValue, reduceFunc func(string, []string) 
 
 	ofile.Close()
 }
+
+// ***** MY CODE END *****
 
 // send an RPC request to the coordinator, wait for the response.
 // usually returns true.

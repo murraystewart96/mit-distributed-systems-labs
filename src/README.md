@@ -1,10 +1,10 @@
 All my code will be encapsulated as such
 
-// ***** MY CODE ***** 
+// ***** MY CODE START ***** 
 
 code...
 
-// ***** MY CODE *****
+// ***** MY CODE END *****
 
 **LAB 1 - MAP REDUCE**
 

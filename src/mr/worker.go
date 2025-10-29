@@ -119,11 +119,11 @@ func mapKvs(task *Task, mapFunc func(string, string) []KeyValue) []KeyValue {
 
 	file, err := os.Open(task.InputFile)
 	if err != nil {
-		log.Fatalf("cannot open %v", task.InputFile)
+		log.Fatalf("cannot open  %v: %s", task.InputFile, err.Error())
 	}
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", task.InputFile)
+		log.Fatalf("cannot read %v: %s", task.InputFile, err.Error())
 	}
 	file.Close()
 	kvs := mapFunc(task.InputFile, string(content))
@@ -142,7 +142,8 @@ func writeIntKeyValues(taskID, nReduce int, intKvs []KeyValue) {
 	for i := range nReduce {
 		intFilename := fmt.Sprintf("mr-%d-%d", taskID, i)
 
-		files[i], err = os.Create(intFilename)
+		// Create temp files that will be renamed later to appear as atomic writes
+		files[i], err = os.CreateTemp("/tmp", intFilename)
 		if err != nil {
 			log.Fatalf("failed to open file (%s): %s", intFilename, err.Error())
 		}
@@ -160,10 +161,16 @@ func writeIntKeyValues(taskID, nReduce int, intKvs []KeyValue) {
 		}
 	}
 
-	// Flush buffers and close files
+	// Flush buffers close files
 	for i := range nReduce {
 		buffers[i].Flush()
 		files[i].Close()
+
+		// Atomic write of int file
+		err := os.Rename(files[i].Name(), "./"+fmt.Sprintf("mr-%d-%d", taskID, i))
+		if err != nil {
+			log.Fatalf("failed to rename int file: %s", err.Error())
+		}
 	}
 }
 
@@ -176,7 +183,7 @@ func readIntKeyValues(task *Task, nMap int) []KeyValue {
 		filename := fmt.Sprintf("mr-%d-%d", i, task.ID)
 		file, err := os.Open(filename)
 		if err != nil {
-			log.Fatalf("cannot open %v", task.InputFile)
+			log.Fatalf("cannot open %v: %s", filename, err.Error())
 		}
 
 		decoder := json.NewDecoder(file)

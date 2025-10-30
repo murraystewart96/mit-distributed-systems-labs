@@ -213,6 +213,9 @@ func reduceKvs(task *Task, intKvs []KeyValue, reduceFunc func(string, []string) 
 		log.Fatalf("cannot create %v", oname)
 	}
 
+	// i marks the first instance of a key
+	// j seeks last instance of the same key
+	// k iterates over keys (i -> j)
 	i := 0
 	for i < len(intKvs) {
 		j := i + 1
@@ -225,7 +228,7 @@ func reduceKvs(task *Task, intKvs []KeyValue, reduceFunc func(string, []string) 
 		}
 		output := reduceFunc(intKvs[i].Key, values)
 
-		// this is the correct format for each line of Reduce output.
+		// Output key values to file
 		fmt.Fprintf(ofile, "%v %v\n", intKvs[i].Key, output)
 
 		i = j

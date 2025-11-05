@@ -18,6 +18,8 @@ import (
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
+
+	"github.com/rs/zerolog/log"
 )
 
 type State int
@@ -42,6 +44,7 @@ type Raft struct {
 
 	currentTerm uint
 	votedFor    int
+	votes       int
 	state       State
 
 	log []Log
@@ -54,14 +57,14 @@ type Raft struct {
 
 type Log struct {
 	Term    uint
-	Command interface{}
+	Command any
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 
 	// Your code here (3A).
 	return int(rf.currentTerm), rf.state == LEADER
@@ -135,16 +138,27 @@ type AppendEntriesReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+	log.Info().Msgf("WAITING ON LOCK - SERVER %d", rf.me)
 
 	// Your code here (3A, 3B).
 	if len(args.Entries) == 0 {
 		// Leader heartbeat
+		log.Info().Msgf("server %d received heartbeat", rf.me)
+
+		// Notify heartbeat chan to reset election timer
+		rf.heartbeatChan <- struct{}{}
+
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+
 		if args.Term >= rf.currentTerm {
 			rf.state = FOLLOWER
+			rf.currentTerm = args.Term
+			log.Info().Msgf("server %d current term %d", rf.me, rf.currentTerm)
 		}
 	}
+
+	log.Info().Msgf("UNLOCKING - SERVER %d", rf.me)
 
 }
 
@@ -168,7 +182,34 @@ type RequestVoteReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+	log.Info().Msgf("VOTE REQUESTED - SERVER %d", rf.me)
+
 	// Your code here (3A, 3B).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	if args.Term < rf.currentTerm {
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		return
+	}
+
+	if rf.votedFor == -1 || rf.votedFor == rf.me {
+		switch {
+		case args.LastLogTerm > rf.currentTerm:
+			log.Info().Msgf("server %d voted for server %d", rf.me, args.CandidateID)
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateID
+
+		case args.LastLogTerm == rf.log[rf.lastApplied].Term && args.LastLogIndex >= rf.lastApplied:
+			log.Info().Msgf("server %d voted for server %d", rf.me, args.CandidateID)
+			reply.VoteGranted = true
+			rf.votedFor = args.CandidateID
+
+		default:
+			reply.VoteGranted = false
+		}
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -200,6 +241,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+	return ok
+}
+
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
 	return ok
 }
 
@@ -245,16 +291,15 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) ticker() {
+	electionTimer := time.NewTimer(randTimeout())
 
 	for rf.killed() == false {
-
 		// Your code here (3A)
 
 		// evaluate code below to make sure this loop can run continuously and only starts elections
 		// when necessary
 
-		electionTimeout := randTimeout()
-		electionTimer := time.NewTimer(electionTimeout)
+		log.Info().Msgf("SERVER %d election loop start SERVER STATE IS %d", rf.me, rf.state)
 
 		select {
 		case <-electionTimer.C:
@@ -264,24 +309,24 @@ func (rf *Raft) ticker() {
 			if rf.state == FOLLOWER {
 				// Become candidate and start election
 				rf.state = CANDIDATE
+				log.Info().Msgf("election timeout - starting election: server %d", rf.me)
 
-				// async election
+				done := make(chan struct{})
 
-				// if it wins it becomes LEADER
+				go rf.startElection(done)
 
-				/*
-					// When you become leader you start sending Heartbeats
-					// possible spin up go-routine when that happens
-					// which runs forever sending heartbeats on a ticker if the current state is leader
-				*/
+				rf.mu.Unlock()
 
-				// if it loses it has BECOME FOLLOWER
+				<-done
+				log.Info().Msgf("SERVER %d - election DONE", rf.me)
 
-				// if there is a draw the function internally starts election again
+			} else {
+				rf.mu.Unlock()
 			}
 
 		case <-rf.heartbeatChan:
-			// Leader is alive -> reset election timeout
+			// Leader is alive -> reset election timeout (still follower)
+			log.Info().Msgf("server %d received heartbeat - restarting election timer", rf.me)
 		}
 
 		electionTimer.Reset(randTimeout())
@@ -290,6 +335,182 @@ func (rf *Raft) ticker() {
 		// // milliseconds.
 		// ms := 50 + (rand.Int63() % 300)
 		// time.Sleep(time.Duration(ms) * time.Millisecond)
+	}
+}
+
+func (rf *Raft) startElection(done chan struct{}) {
+	rf.mu.RLock()
+	isCandidate := rf.state == CANDIDATE
+	rf.mu.RUnlock()
+
+	timeout := randTimeout()
+	timer := time.NewTimer(timeout)
+
+	for isCandidate && !rf.killed() {
+		rf.mu.Lock()
+
+		// Increment current term and vote for self
+		rf.currentTerm++
+		rf.votedFor = rf.me
+		rf.votes = 1
+
+		rf.mu.Unlock()
+
+		voteCh := make(chan struct{})
+
+		// Request vote from other servers
+		log.Info().Msgf("server %d sending vote requests", rf.me)
+		for i := range rf.peers {
+			if i != rf.me {
+				rf.mu.RLock()
+				args := &RequestVoteArgs{
+					Term:         rf.currentTerm,
+					CandidateID:  rf.me,
+					LastLogIndex: rf.lastApplied,
+					LastLogTerm:  rf.log[rf.lastApplied].Term,
+				}
+				rf.mu.RUnlock()
+
+				reply := &RequestVoteReply{}
+
+				// Send out vote requests
+				go func(server int, voteCh chan struct{}) {
+					log.Info().Msgf("server %d sending vote request to %d", rf.me, server)
+
+					ok := rf.sendRequestVote(server, args, reply)
+					if !ok {
+						//log.Warn().Msgf("rpc request vote failed to server: %d", server)
+					}
+
+					if reply.VoteGranted {
+						voteCh <- struct{}{} // receive vote
+						return
+					}
+
+					rf.mu.Lock()
+					defer rf.mu.Unlock()
+
+					if reply.Term > rf.currentTerm {
+						rf.currentTerm = reply.Term
+					}
+				}(i, voteCh)
+			}
+		}
+
+		// Wait for votes or timeout
+		electionOver := false
+		for !electionOver {
+			select {
+			case <-timer.C:
+				electionOver = true
+
+				rf.mu.Lock()
+				isCandidate = rf.state == CANDIDATE
+				rf.votedFor = -1
+				rf.mu.Unlock()
+
+				timer.Reset(randTimeout())
+
+			case <-voteCh:
+				rf.mu.Lock()
+				rf.votes++
+
+				if rf.votes > (len(rf.peers) / 2) {
+					// Candidate has won election
+					log.Info().Msgf("server %d won election - changing to leader", rf.me)
+
+					rf.state = LEADER
+					isCandidate = false
+
+					// Start sending heartbeats
+					go rf.sendHeartbeats()
+
+					electionOver = true
+					rf.votedFor = -1
+				}
+
+				rf.mu.Unlock()
+			}
+		}
+
+		if electionOver {
+			done <- struct{}{}
+		}
+	}
+
+	log.Info().Msg("EXITING election func")
+}
+
+func (rf *Raft) sendHeartbeats() {
+
+	rf.mu.Lock()
+	term := rf.currentTerm
+	rf.mu.Unlock()
+
+	// Send intial heartbeats
+	for i := range rf.peers {
+		if i != rf.me {
+			args := &AppendEntriesArgs{
+				Term:    term,
+				Entries: []Log{},
+			}
+			reply := &AppendEntriesReply{}
+
+			log.Info().Msgf("sending heartbeat to %d", i)
+
+			go func(server int) {
+				ok := rf.sendAppendEntries(server, args, reply)
+				if !ok {
+					log.Warn().Msgf("rpc append entries heartbeat failed for server: %d", server)
+				}
+			}(i)
+		}
+	}
+
+	ticker := time.NewTicker(time.Millisecond * 100)
+
+	for !rf.killed() {
+		select {
+		case <-ticker.C:
+			log.Info().Msgf("HEARTBEAT - LOCK server %d", rf.me)
+
+			rf.mu.RLock() // RLOCK
+			term = rf.currentTerm
+			isLeader := rf.state == LEADER
+
+			log.Info().Msgf("HEARTBEAT - UNLOCK server %d", rf.me)
+
+			rf.mu.RUnlock() // RUNLOCK
+
+			log.Info().Msgf("HEARTBEAT - TICKER server %d -- leader state == %d", rf.me, rf.state)
+
+			if isLeader {
+				for i := range rf.peers {
+					if i != rf.me {
+						args := &AppendEntriesArgs{
+							Term:    rf.currentTerm,
+							Entries: []Log{},
+						}
+						reply := &AppendEntriesReply{}
+
+						log.Info().Msgf("sending heartbeat to %d", i)
+
+						go func(server int) {
+							ok := rf.sendAppendEntries(server, args, reply)
+							if !ok {
+								log.Warn().Msgf("rpc append entries heartbeat failed for server: %d", server)
+							}
+						}(i)
+					}
+				}
+			} else {
+				// No longer leader - stop sending heartbeats
+				log.Info().Msgf("%d NOT LEADER - STOP SENDING HEARTBEATS", rf.me)
+
+				ticker.Stop()
+				return
+			}
+		}
 	}
 }
 
@@ -314,10 +535,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
-	rf.heartbeatChan = make(chan struct{})
 
 	// Your initialization code here (3A, 3B, 3C).
-
+	rf.state = FOLLOWER
+	rf.heartbeatChan = make(chan struct{})
+	rf.log = []Log{{Term: 0}}
+	rf.votedFor = -1
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 

@@ -144,13 +144,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		log.Info().Msgf("server %d received heartbeat", rf.me)
 
 		// Notify heartbeat chan to reset election timer
-		rf.mu.RLock()
-		if rf.state == FOLLOWER {
-			rf.mu.RUnlock()
-			rf.heartbeatChan <- struct{}{} // CHECK TO SEE IF THIS IS BEING CONSUMED FREQUENTLY ENOUGH
-		} else {
-			rf.mu.RUnlock()
-		}
+		rf.heartbeatChan <- struct{}{}
 
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
@@ -158,6 +152,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if args.Term >= rf.currentTerm {
 			rf.state = FOLLOWER
 			rf.currentTerm = args.Term
+			rf.votedFor = -1
 			log.Info().Msgf("server %d current term %d", rf.me, rf.currentTerm)
 		}
 	}
@@ -183,8 +178,6 @@ type RequestVoteReply struct {
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	log.Info().Msgf("VOTE REQUESTED - SERVER %d", rf.me)
-
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -199,11 +192,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		switch {
 		case args.LastLogTerm > rf.currentTerm:
 			log.Info().Msgf("server %d voted for server %d", rf.me, args.CandidateID)
+			if rf.votedFor == rf.me {
+				rf.votes-- // Remove vote from your own vote count
+			}
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
 
 		case args.LastLogTerm == rf.log[rf.lastApplied].Term && args.LastLogIndex >= rf.lastApplied:
 			log.Info().Msgf("server %d voted for server %d", rf.me, args.CandidateID)
+			if rf.votedFor == rf.me {
+				rf.votes-- // Remove vote from your own vote count
+			}
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
 
@@ -297,7 +296,6 @@ func (rf *Raft) ticker() {
 
 	for rf.killed() == false {
 		// Your code here (3A)
-
 		select {
 		case <-electionTimer.C:
 			// timeout reached -> start election
@@ -321,7 +319,6 @@ func (rf *Raft) ticker() {
 
 		case <-electionDone:
 			electionTimer.Reset(randTimeout())
-
 		}
 	}
 }
@@ -367,7 +364,7 @@ func (rf *Raft) startElection(done chan struct{}) {
 
 					ok := rf.sendRequestVote(server, args, reply)
 					if !ok {
-						//log.Warn().Msgf("rpc request vote failed to server: %d", server)
+						log.Warn().Msgf("rpc request vote failed to server: %d", server)
 					}
 
 					if reply.VoteGranted {
@@ -428,7 +425,6 @@ func (rf *Raft) startElection(done chan struct{}) {
 }
 
 func (rf *Raft) sendHeartbeats() {
-
 	rf.mu.Lock()
 	term := rf.currentTerm
 	rf.mu.Unlock()

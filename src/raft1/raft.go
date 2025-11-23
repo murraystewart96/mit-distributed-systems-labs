@@ -43,7 +43,7 @@ type Raft struct {
 	// state a Raft server must maintain.
 
 	heartbeatCh chan struct{}
-	commitCh    chan struct{}
+	commitCh    chan int
 	applyCh     chan raftapi.ApplyMsg
 	cond        *sync.Cond
 
@@ -493,7 +493,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (3A, 3B, 3C).
 	rf.state = FOLLOWER
 	rf.heartbeatCh = make(chan struct{})
-	rf.commitCh = make(chan struct{})
+	rf.commitCh = make(chan int)
 	rf.log = []Log{{Term: 0}}
 	rf.votedFor = -1
 	rf.applyCh = applyCh

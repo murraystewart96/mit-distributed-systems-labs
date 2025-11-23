@@ -11,6 +11,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
 
+	reply.Term = rf.currentTerm
+
 	//log.Info().Msgf("[%d] Follower Append entries rpc - leader commit [%d] follower commit [%d]", rf.me, args.LeaderCommit, rf.commitIndex)
 
 	// if commit index is higher commit up to commit index (what if log doesnt have all commited entries?)
@@ -20,12 +22,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		// Signal to commit log entries
 		log.Info().Msgf("[%d] commitIndex updated - commit up to %d - state == %d", rf.me, rf.commitIndex, rf.state)
 
+		commitIndex := rf.commitIndex // copy before releasing lock
+
 		rf.mu.Unlock()
-		rf.commitCh <- struct{}{} // Signal commit worker to commit entries
+		rf.commitCh <- commitIndex // Signal commit worker to commit entries
 		rf.mu.Lock()
 	}
-
-	reply.Term = rf.currentTerm
 
 	rf.mu.Unlock()
 
@@ -69,7 +71,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 		rf.log = rf.log[:args.PrevLogIndex]
 
-		//log.Info().Msgf("[%d] FOLLOWER Mismatching entry - leader has term %d - follower has term %d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
+		log.Info().Msgf("[%d] FOLLOWER Mismatching entry - leader has term %d - follower has term %d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
 
 		// Get first index of that term in log
 		firstIndex := args.PrevLogIndex
@@ -83,6 +85,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.XIndex = firstIndex
 	} else {
 		// Matching log terms
+
+		log.Info().Msgf("[%d]  Appending entries %v", rf.me, args.Entries)
 
 		if len(rf.log) == args.PrevLogIndex+1 {
 			// Append leader's new entries
@@ -105,7 +109,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			}
 		}
 
-		rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...) // Come back to this later to address out of order appendEntries
+		//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...) // Come back to this later to address out of order appendEntries
 
 		reply.Success = true
 	}
@@ -136,9 +140,16 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	}
 
 	// Your code here (3B).
-	index = rf.lastApplied + 1
 	term = rf.currentTerm
+	index = len(rf.log)
 
+	// Append to local log
+	rf.log = append(rf.log, Log{
+		Term:    rf.currentTerm,
+		Command: command,
+	})
+
+	// Send append requests to followers
 	go rf.appendEntries(command)
 
 	return index, term, isLeader
@@ -147,12 +158,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) appendEntries(command interface{}) {
 	rf.mu.Lock()
 	// Append to leader's log first
-	log.Info().Msgf("[%d] Appending entry at index %d", rf.me, len(rf.log))
-
-	rf.log = append(rf.log, Log{
-		Term:    rf.currentTerm,
-		Command: command,
-	})
+	log.Info().Msgf("[%d] Appending entry %v at index %d", rf.me, command, len(rf.log)-1)
 
 	commandIndex := len(rf.log) - 1
 
@@ -269,6 +275,8 @@ func (rf *Raft) appendEntries(command interface{}) {
 						rf.nextIndex[server] = commandIndex + 1
 						rf.matchIndex[server] = commandIndex
 
+						// Here we should check if majority of servers have replicated
+
 						// Acknowledge successful replication
 						rf.mu.Unlock()
 						ackCh <- struct{}{}
@@ -302,27 +310,32 @@ func (rf *Raft) appendEntries(command interface{}) {
 
 				log.Info().Msgf("[%d] LEADER COMMITTING for command index %d", rf.me, commandIndex)
 
-				// Commit all uncommited entries up to and including command index
-				for i := rf.lastApplied + 1; i <= commandIndex; i++ {
-					log.Info().Msgf("[%d] LEADER COMMITTING cmd(%v) entry at %d", rf.me, rf.log[i].Command, rf.lastApplied+1)
-
-					applyMsg := raftapi.ApplyMsg{
-						Command:      rf.log[i].Command,
-						CommandValid: true,
-						CommandIndex: rf.lastApplied + 1,
-					}
-
-					rf.mu.Unlock()
-					rf.applyCh <- applyMsg
-					rf.mu.Lock()
-					rf.lastApplied++
-				}
-
+				// Update commitIndex before signalling commit worker
 				if commandIndex > rf.commitIndex {
-					rf.commitIndex = commandIndex
+					rf.mu.Unlock()
+					rf.commitCh <- commandIndex // COND MIGHT BE BETTER // SIGNAL HERE
+				} else {
+					rf.mu.Unlock()
 				}
 
-				rf.mu.Unlock()
+				// // Commit all uncommited entries up to and including command index
+				// for i := rf.lastApplied + 1; i <= commandIndex; i++ {
+				// 	log.Info().Msgf("[%d] LEADER COMMITTING cmd(%v) entry at %d", rf.me, rf.log[i].Command, rf.lastApplied+1)
+
+				// 	applyMsg := raftapi.ApplyMsg{
+				// 		Command:      rf.log[i].Command,
+				// 		CommandValid: true,
+				// 		CommandIndex: i,
+				// 	}
+
+				// 	rf.mu.Unlock()
+				// 	rf.applyCh <- applyMsg
+				// 	rf.mu.Lock()
+				// 	rf.lastApplied = i
+				// 	//rf.commitIndex = i
+				// }
+
+				//rf.mu.Unlock()
 
 				break
 			}
@@ -332,32 +345,42 @@ func (rf *Raft) appendEntries(command interface{}) {
 
 func (rf *Raft) logCommitWorker() {
 	for !rf.killed() {
-		for range rf.commitCh {
+		for commitIndex := range rf.commitCh {
 			rf.mu.Lock()
 
 			if rf.state == FOLLOWER {
-				log.Info().Msgf("[%d] Committing logs from [%d] to [%d]", rf.me, rf.lastApplied, rf.commitIndex)
+				log.Info().Msgf("[%d] FOLLOWER Committing logs from [%d] to [%d]", rf.me, rf.lastApplied, rf.commitIndex)
+			} else {
+				log.Info().Msgf("[%d] LEADER Committing logs from [%d] to [%d]", rf.me, rf.lastApplied, rf.commitIndex)
 
-				// Commit logs
-				for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-					applyMsg := raftapi.ApplyMsg{
-						Command:      rf.log[i].Command,
-						CommandValid: true,
-						CommandIndex: i,
-					}
+			}
 
-					//
-					log.Info().Msgf("[%d] FOLLOWER COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
+			// CHECK WHAT THE HIGHEST REPLICATED
 
-					rf.mu.Unlock()
-					rf.applyCh <- applyMsg
-					rf.mu.Lock()
+			log.Info().Msgf("[%d] LOG - %v", rf.me, rf.log)
 
-					rf.lastApplied = i
+			// Commit logs
+			for i := rf.lastApplied + 1; i <= commitIndex; i++ {
+				applyMsg := raftapi.ApplyMsg{
+					Command:      rf.log[i].Command,
+					CommandValid: true,
+					CommandIndex: i,
 				}
+
+				//
+				log.Info().Msgf("[%d] COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
+
+				rf.mu.Unlock()
+				rf.applyCh <- applyMsg
+				rf.mu.Lock()
+
+				rf.lastApplied = i
+				rf.commitIndex = i
 			}
 
 			rf.mu.Unlock()
 		}
+
+		//}
 	}
 }

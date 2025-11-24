@@ -361,8 +361,6 @@ func (rf *Raft) startElection(done chan struct{}) {
 					rf.votedFor = -1
 
 					// Init followers nextIndices
-					log.Info().Msgf("[%d] setting next index to %d", rf.me, len(rf.log))
-
 					for i := range rf.nextIndex {
 						rf.nextIndex[i] = len(rf.log)
 					}
@@ -461,6 +459,8 @@ func (rf *Raft) sendHeartbeats() {
 				PrevLogTerm:  prevTerm,
 			}
 			reply := &AppendEntriesReply{}
+
+			//log.Info().Msgf("[%d] sending heartbeats to %d", rf.me, i)
 
 			go func(server int) {
 				ok := rf.sendAppendEntries(server, args, reply)

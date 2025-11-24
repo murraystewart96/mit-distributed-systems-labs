@@ -260,14 +260,22 @@ func (rf *Raft) appendEntries() {
 
 						}
 					} else {
-						//	log.Info().Msgf("[%d] Append entries successful to %d", rf.me, server)
+						log.Info().Msgf("[%d] Append entries successful to %d", rf.me, server)
 
 						rf.mu.Lock()
 						// Update follower's next and match index
-						rf.nextIndex[server] = commandIndex + 1
-						rf.matchIndex[server] = commandIndex
+						// Guard against old commands being processed
+						if rf.nextIndex[server] < commandIndex+1 {
+							rf.nextIndex[server] = commandIndex + 1
+						}
+						if rf.matchIndex[server] < commandIndex {
+							rf.matchIndex[server] = commandIndex
+						}
+
+						log.Info().Msgf("[%d] Append entries successful to %d - next index = %d", rf.me, server, commandIndex+1)
 
 						// Here we should check if majority of servers have replicated
+						// Signal to commit worker
 
 						// Acknowledge successful replication
 						rf.mu.Unlock()
@@ -325,6 +333,8 @@ func (rf *Raft) logCommitWorker() {
 
 			//log.Info().Msgf("[%d] LOG - %v", rf.me, rf.log)
 
+			log.Info().Msgf("[%d] COMMITTING from [%d] to [%d]", rf.me, rf.lastApplied+1, commitIndex)
+
 			// Commit logs
 			for i := rf.lastApplied + 1; i <= commitIndex; i++ {
 				applyMsg := raftapi.ApplyMsg{
@@ -334,7 +344,7 @@ func (rf *Raft) logCommitWorker() {
 				}
 
 				//
-				//	log.Info().Msgf("[%d] COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
+				//log.Info().Msgf("[%d] COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
 
 				rf.mu.Unlock()
 				rf.applyCh <- applyMsg

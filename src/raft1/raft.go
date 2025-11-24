@@ -361,8 +361,10 @@ func (rf *Raft) startElection(done chan struct{}) {
 					rf.votedFor = -1
 
 					// Init followers nextIndices
+					log.Info().Msgf("[%d] setting next index to %d", rf.me, len(rf.log))
+
 					for i := range rf.nextIndex {
-						rf.nextIndex[i] = rf.lastApplied + 1
+						rf.nextIndex[i] = len(rf.log)
 					}
 				}
 
@@ -415,13 +417,8 @@ func (rf *Raft) requestVotes(voteCh chan struct{}) {
 }
 
 func (rf *Raft) startHeartbeat() {
-	rf.mu.Lock()
-	term := rf.currentTerm
-	leaderCommit := rf.commitIndex
-	rf.mu.Unlock()
-
 	// Send intial heartbeats
-	rf.sendHeartbeats(term, leaderCommit)
+	rf.sendHeartbeats()
 
 	ticker := time.NewTicker(time.Millisecond * 100)
 
@@ -431,13 +428,11 @@ func (rf *Raft) startHeartbeat() {
 		<-ticker.C
 
 		rf.mu.Lock()
-		term = rf.currentTerm
 		isLeader := rf.state == LEADER
-		leaderCommit := rf.commitIndex
 		rf.mu.Unlock()
 
 		if isLeader {
-			rf.sendHeartbeats(term, leaderCommit)
+			rf.sendHeartbeats()
 		} else {
 			// No longer leader - stop sending heartbeats
 			log.Info().Msgf("[%d] NOT LEADER - STOP SENDING HEARTBEATS", rf.me)
@@ -448,13 +443,22 @@ func (rf *Raft) startHeartbeat() {
 	}
 }
 
-func (rf *Raft) sendHeartbeats(term, leaderCommit int) {
+func (rf *Raft) sendHeartbeats() {
 	for i := range rf.peers {
 		if i != rf.me {
+			rf.mu.Lock()
+			term := rf.currentTerm
+			leaderCommit := rf.commitIndex
+			prevIndex := rf.nextIndex[i] - 1
+			prevTerm := rf.log[rf.nextIndex[i]-1].Term
+			rf.mu.Unlock()
+
 			args := &AppendEntriesArgs{
 				Term:         term,
 				Entries:      []Log{},
 				LeaderCommit: leaderCommit,
+				PrevLogIndex: prevIndex,
+				PrevLogTerm:  prevTerm,
 			}
 			reply := &AppendEntriesReply{}
 

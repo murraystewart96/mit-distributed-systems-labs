@@ -8,108 +8,101 @@ import (
 )
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
-	// Your code here (3A, 3B).
-	rf.mu.Lock()
-
-	reply.Term = rf.currentTerm
-
-	//log.Info().Msgf("[%d] Follower Append entries rpc - leader commit [%d] follower commit [%d]", rf.me, args.LeaderCommit, rf.commitIndex)
-
-	// if commit index is higher commit up to commit index (what if log doesnt have all commited entries?)
-	if args.LeaderCommit > rf.commitIndex {
-		rf.commitIndex = int(math.Min(float64(len(rf.log)-1), float64(args.LeaderCommit)))
-
-		// Signal to commit log entries
-		log.Info().Msgf("[%d] commitIndex updated - commit up to %d - state == %d", rf.me, rf.commitIndex, rf.state)
-
-		commitIndex := rf.commitIndex // copy before releasing lock
-
-		rf.mu.Unlock()
-		rf.commitCh <- commitIndex // Signal commit worker to commit entries
-		rf.mu.Lock()
-	}
-
-	rf.mu.Unlock()
-
-	if len(args.Entries) == 0 {
-		rf.mu.Lock()
-
-		if args.Term >= rf.currentTerm {
-			// Leader heartbeat
-
-			// Notify heartbeat chan to reset election timer
-			rf.mu.Unlock()
-			rf.heartbeatCh <- struct{}{}
-			rf.mu.Lock()
-
-			rf.state = FOLLOWER
-			rf.currentTerm = args.Term
-			rf.votedFor = -1
-		}
-
-		rf.mu.Unlock()
-
-		return
-	}
-
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// Apply log consistency check and append if successful
+	reply.Term = rf.currentTerm
 
-	// Check if entry exists at prevLogIndex
-	if args.PrevLogIndex >= len(rf.log) {
-		// Entry doesn't exist
-		reply.XLen = len(rf.log)
-		reply.XTerm = -1
+	if args.Term >= rf.currentTerm {
+		// Revert to follower
+		rf.state = FOLLOWER
+		rf.currentTerm = args.Term
+		rf.votedFor = -1
 
-		//log.Info().Msgf("[%d] FOLLOWER No entry - at index %d", rf.me, args.PrevLogIndex)
+		// Perform log consistency check
+		// Check if entry exists at prevLogIndex
+		if args.PrevLogIndex >= len(rf.log) {
+			// Entry doesn't exist
+			reply.XLen = len(rf.log)
+			reply.XTerm = -1
 
-	} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
-		// Mismatching log terms
-		reply.XTerm = rf.log[args.PrevLogIndex].Term
+			log.Info().Msgf("[%d] FOLLOWER No entry - at index %d", rf.me, args.PrevLogIndex)
 
-		rf.log = rf.log[:args.PrevLogIndex]
+			return
 
-		log.Info().Msgf("[%d] FOLLOWER Mismatching entry - leader has term %d - follower has term %d", rf.me, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
+		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			// Mismatching log terms
+			reply.XTerm = rf.log[args.PrevLogIndex].Term
 
-		// Get first index of that term in log
-		firstIndex := args.PrevLogIndex
-		for i := args.PrevLogIndex - 1; i >= 0; i-- {
-			if rf.log[i].Term != rf.log[args.PrevLogIndex].Term {
-				break
-			}
-			firstIndex = i
-		}
+			log.Info().Msgf("[%d] FOLLOWER Mismatching entry AT index %d - leader has term %d - follower has term %d", rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
 
-		reply.XIndex = firstIndex
-	} else {
-		// Matching log terms
-
-		log.Info().Msgf("[%d]  Appending entries %v", rf.me, args.Entries)
-
-		if len(rf.log) == args.PrevLogIndex+1 {
-			// Append leader's new entries
-			rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
-		} else {
-			// Follower contains entries beyond those being appended
-			nextIndex := args.PrevLogIndex + 1
-
-			// Write new entries without removing subsequent entries
-			for i := range args.Entries {
-				if nextIndex >= len(rf.log) {
-					// Beyond existing log length -- append the rest
-					rf.log = append(rf.log, args.Entries[i:]...)
+			// Get first index of that term in log
+			firstIndex := args.PrevLogIndex
+			for i := args.PrevLogIndex - 1; i >= 0; i-- {
+				if rf.log[i].Term != rf.log[args.PrevLogIndex].Term {
 					break
 				}
+				firstIndex = i
+			}
 
-				// Overwrite log entry
-				rf.log[nextIndex] = args.Entries[i]
-				nextIndex++
+			reply.XIndex = firstIndex
+
+			rf.log = rf.log[:args.PrevLogIndex]
+
+			return
+		} else {
+			// Matching log terms
+
+			// last index that has been verified by the leader
+			lastVerifiedIndex := len(rf.log) - 1
+
+			if len(args.Entries) == 0 {
+				// Notify heartbeat chan to reset election timer
+				rf.mu.Unlock()
+				rf.heartbeatCh <- struct{}{}
+				rf.mu.Lock()
+
+				// heartbeat's prevLogIndex is the last entry the leader has verified
+				lastVerifiedIndex = args.PrevLogIndex
+
+			} else {
+				if len(rf.log) == args.PrevLogIndex+1 {
+					// Append leader's new entries
+					rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...)
+				} else {
+					// Follower contains entries beyond those being appended
+					nextIndex := args.PrevLogIndex + 1
+
+					// Write new entries without removing subsequent entries
+					for i := range args.Entries {
+						if nextIndex >= len(rf.log) {
+							// Beyond existing log length -- append the rest
+							rf.log = append(rf.log, args.Entries[i:]...)
+							break
+						}
+
+						// Overwrite log entry
+						rf.log[nextIndex] = args.Entries[i]
+						nextIndex++
+					}
+				}
+			}
+
+			// Check if logs needs to be committed
+			// If commit index has updated follower should commit up to the index of its last verified entry
+			// Take min (lastVerifiedIndex, leaderCommit) to prevent committing false entries in log
+			if args.LeaderCommit > rf.commitIndex {
+				rf.commitIndex = int(math.Min(float64(lastVerifiedIndex), float64(args.LeaderCommit)))
+
+				// Signal to commit log entries
+
+				commitIndex := rf.commitIndex // copy before releasing lock
+
+				rf.mu.Unlock()
+				rf.commitCh <- commitIndex // Signal commit worker to commit entries
+				rf.mu.Lock()
 			}
 		}
-
-		//rf.log = append(rf.log[:args.PrevLogIndex+1], args.Entries...) // Come back to this later to address out of order appendEntries
 
 		reply.Success = true
 	}
@@ -149,16 +142,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	})
 
+	//log.Info().Msgf("[%d] Appending entry %v at index %d", rf.me, command, len(rf.log)-1)
+
 	// Send append requests to followers
-	go rf.appendEntries(command)
+	go rf.appendEntries()
 
 	return index, term, isLeader
 }
 
-func (rf *Raft) appendEntries(command interface{}) {
+func (rf *Raft) appendEntries() {
 	rf.mu.Lock()
 	// Append to leader's log first
-	log.Info().Msgf("[%d] Appending entry %v at index %d", rf.me, command, len(rf.log)-1)
 
 	commandIndex := len(rf.log) - 1
 
@@ -171,17 +165,25 @@ func (rf *Raft) appendEntries(command interface{}) {
 	for server := range rf.peers {
 		if server != rf.me {
 			go func(server, commandIndex int, ackCh chan struct{}) {
+				rf.mu.Lock()
+				nextIndex := rf.nextIndex[server]
+				rf.mu.Unlock()
+
 				success := false
-				for !success {
+
+				for !success && !rf.killed() {
 					rf.mu.Lock()
 
+					// Prevent next index from being zero on retries
+					if nextIndex == 0 {
+						nextIndex = 1
+					}
+
 					// Exit if no longer leader
-					if rf.state != LEADER {
+					if rf.state != LEADER { // TODO: review if this works or can be improved
 						rf.mu.Unlock()
 						return
 					}
-
-					nextIndex := rf.nextIndex[server]
 
 					args := &AppendEntriesArgs{
 						Term:         rf.currentTerm,
@@ -194,17 +196,6 @@ func (rf *Raft) appendEntries(command interface{}) {
 					rf.mu.Unlock()
 
 					reply := &AppendEntriesReply{}
-					//log.Info().Msgf("[%d] sending append entries %v to %d", rf.me, args, server)
-					// log.Info().
-					// 	Int("server", rf.me).
-					// 	Int("target", server).
-					// 	Int("term", args.Term).
-					// 	Int("leader_id", args.LeaderID).
-					// 	Int("prev_log_index", args.PrevLogIndex).
-					// 	Int("prev_log_term", args.PrevLogTerm).
-					// 	Int("entries_count", len(args.Entries)).
-					// 	Int("leader_commit", args.LeaderCommit).
-					// 	Msgf("[%d] sending append entries to %d", rf.me, server)
 
 					ok := rf.sendAppendEntries(server, args, reply)
 					if !ok {
@@ -266,6 +257,7 @@ func (rf *Raft) appendEntries(command interface{}) {
 
 								nextIndex = lastIndex
 							}
+
 						}
 					} else {
 						//	log.Info().Msgf("[%d] Append entries successful to %d", rf.me, server)
@@ -308,7 +300,7 @@ func (rf *Raft) appendEntries(command interface{}) {
 					return
 				}
 
-				log.Info().Msgf("[%d] LEADER COMMITTING for command index %d", rf.me, commandIndex)
+				log.Info().Msgf("[%d] leader committing entry at index %d", rf.me, commandIndex)
 
 				// Update commitIndex before signalling commit worker
 				if commandIndex > rf.commitIndex {
@@ -317,25 +309,6 @@ func (rf *Raft) appendEntries(command interface{}) {
 				} else {
 					rf.mu.Unlock()
 				}
-
-				// // Commit all uncommited entries up to and including command index
-				// for i := rf.lastApplied + 1; i <= commandIndex; i++ {
-				// 	log.Info().Msgf("[%d] LEADER COMMITTING cmd(%v) entry at %d", rf.me, rf.log[i].Command, rf.lastApplied+1)
-
-				// 	applyMsg := raftapi.ApplyMsg{
-				// 		Command:      rf.log[i].Command,
-				// 		CommandValid: true,
-				// 		CommandIndex: i,
-				// 	}
-
-				// 	rf.mu.Unlock()
-				// 	rf.applyCh <- applyMsg
-				// 	rf.mu.Lock()
-				// 	rf.lastApplied = i
-				// 	//rf.commitIndex = i
-				// }
-
-				//rf.mu.Unlock()
 
 				break
 			}
@@ -348,16 +321,9 @@ func (rf *Raft) logCommitWorker() {
 		for commitIndex := range rf.commitCh {
 			rf.mu.Lock()
 
-			if rf.state == FOLLOWER {
-				log.Info().Msgf("[%d] FOLLOWER Committing logs from [%d] to [%d]", rf.me, rf.lastApplied, rf.commitIndex)
-			} else {
-				log.Info().Msgf("[%d] LEADER Committing logs from [%d] to [%d]", rf.me, rf.lastApplied, rf.commitIndex)
-
-			}
-
 			// CHECK WHAT THE HIGHEST REPLICATED
 
-			log.Info().Msgf("[%d] LOG - %v", rf.me, rf.log)
+			//log.Info().Msgf("[%d] LOG - %v", rf.me, rf.log)
 
 			// Commit logs
 			for i := rf.lastApplied + 1; i <= commitIndex; i++ {
@@ -368,7 +334,7 @@ func (rf *Raft) logCommitWorker() {
 				}
 
 				//
-				log.Info().Msgf("[%d] COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
+				//	log.Info().Msgf("[%d] COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
 
 				rf.mu.Unlock()
 				rf.applyCh <- applyMsg

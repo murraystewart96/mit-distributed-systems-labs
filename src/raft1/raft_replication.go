@@ -26,15 +26,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.XLen = len(rf.log)
 			reply.XTerm = -1
 
-			log.Info().Msgf("[%d] FOLLOWER No entry - at index %d", rf.me, args.PrevLogIndex)
-
 			return
 
 		} else if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 			// Mismatching log terms
 			reply.XTerm = rf.log[args.PrevLogIndex].Term
-
-			log.Info().Msgf("[%d] FOLLOWER Mismatching entry AT index %d - leader has term %d - follower has term %d", rf.me, args.PrevLogIndex, args.PrevLogTerm, rf.log[args.PrevLogIndex].Term)
 
 			// Get first index of that term in log
 			firstIndex := args.PrevLogIndex
@@ -95,7 +91,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 				rf.commitIndex = int(math.Min(float64(lastVerifiedIndex), float64(args.LeaderCommit)))
 
 				// Signal to commit log entries
-
 				commitIndex := rf.commitIndex // copy before releasing lock
 
 				rf.mu.Unlock()
@@ -153,7 +148,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) appendEntries() {
 	rf.mu.Lock()
 	// Append to leader's log first
-
 	commandIndex := len(rf.log) - 1
 
 	rf.mu.Unlock()
@@ -250,11 +244,11 @@ func (rf *Raft) appendEntries() {
 
 							if lastIndex == -1 {
 								//log.Info().Msgf("[%d] LEADER Mismatching entry - leader DOES NOT contain term %d -> next index %d", rf.me, reply.XTerm, reply.XIndex)
-
+								// Leader doesn't contain mismatching entry
 								nextIndex = reply.XIndex
 							} else {
 								//log.Info().Msgf("[%d] LEADER Mismatching entry - leader CONTAINS term %d FOLLOWE contains %d -> next index %d", rf.me, args.PrevLogTerm, reply.XTerm, lastIndex)
-
+								// Leader contains mismatching entry
 								nextIndex = lastIndex
 							}
 
@@ -271,8 +265,6 @@ func (rf *Raft) appendEntries() {
 						if rf.matchIndex[server] < commandIndex {
 							rf.matchIndex[server] = commandIndex
 						}
-
-						log.Info().Msgf("[%d] Append entries successful to %d - next index = %d", rf.me, server, commandIndex+1)
 
 						// Here we should check if majority of servers have replicated
 						// Signal to commit worker
@@ -305,6 +297,8 @@ func (rf *Raft) appendEntries() {
 
 				if rf.state == FOLLOWER { // MOVE TO TOP OF LOOP
 					rf.mu.Unlock()
+					log.Info().Msgf("[%d] BLA BLA BLA %d", rf.me, commandIndex)
+
 					return
 				}
 
@@ -326,7 +320,8 @@ func (rf *Raft) appendEntries() {
 
 func (rf *Raft) logCommitWorker() {
 	for !rf.killed() {
-		for commitIndex := range rf.commitCh {
+		select {
+		case commitIndex := <-rf.commitCh:
 			rf.mu.Lock()
 
 			// CHECK WHAT THE HIGHEST REPLICATED
@@ -355,8 +350,10 @@ func (rf *Raft) logCommitWorker() {
 			}
 
 			rf.mu.Unlock()
-		}
 
+		case <-rf.ctx.Done():
+			return
+		}
 		//}
 	}
 }

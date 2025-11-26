@@ -9,6 +9,7 @@ package raft
 import (
 	//	"bytes"
 
+	"context"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,8 @@ type Raft struct {
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
@@ -202,11 +205,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			log.Info().Msgf("[%d] voted for server %d", rf.me, args.CandidateID)
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
-		} else {
-			log.Info().Msgf("[%d] requester last term [%d] voter last term [%d]", rf.me, args.LastLogTerm, lastLogTerm)
-			log.Info().Msgf("[%d] requester last index [%d] voter last index [%d]", rf.me, args.LastLogIndex, lastLogIndex)
-
-			log.Info().Msgf("[%d] NOT granting vote to %d -  log is out of date", rf.me, args.CandidateID)
+			// maybe reset timer
 		}
 	}
 }
@@ -260,6 +259,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+	rf.cancel()
 }
 
 func (rf *Raft) killed() bool {
@@ -293,6 +293,9 @@ func (rf *Raft) ticker() {
 
 		case <-electionDone:
 			electionTimer.Reset(randTimeout())
+
+		case <-rf.ctx.Done():
+			return
 		}
 	}
 }
@@ -327,7 +330,9 @@ func (rf *Raft) startElection(done chan struct{}) {
 		// Request votes for this election
 		votes := 1
 		voteCh := make(chan struct{})
-		rf.requestVotes(voteCh)
+
+		reqVotesCtx, cancelReqVotes := context.WithTimeout(rf.ctx, timeout)
+		rf.requestVotes(reqVotesCtx, voteCh)
 
 		// Wait for votes or timeout
 		electionOver := false
@@ -367,8 +372,15 @@ func (rf *Raft) startElection(done chan struct{}) {
 				}
 
 				rf.mu.Unlock()
+
+			case <-rf.ctx.Done():
+				cancelReqVotes()
+				return
 			}
 		}
+
+		// Signal to remaining voters election is over
+		cancelReqVotes()
 
 		if electionOver && !isCandidate {
 			done <- struct{}{}
@@ -376,7 +388,7 @@ func (rf *Raft) startElection(done chan struct{}) {
 	}
 }
 
-func (rf *Raft) requestVotes(voteCh chan struct{}) {
+func (rf *Raft) requestVotes(ctx context.Context, voteCh chan struct{}) {
 	// Request vote from other servers
 	for server := range rf.peers {
 		if server != rf.me {
@@ -399,8 +411,12 @@ func (rf *Raft) requestVotes(voteCh chan struct{}) {
 				}
 
 				if reply.VoteGranted {
-					voteCh <- struct{}{} // receive vote
-					return
+					select {
+					case <-ctx.Done():
+						return
+					case voteCh <- struct{}{}:
+						return
+					}
 				}
 
 				rf.mu.Lock()
@@ -422,20 +438,23 @@ func (rf *Raft) startHeartbeat() {
 
 	// Send periodic heartbeats
 	for !rf.killed() {
+		select {
+		case <-ticker.C:
+			rf.mu.Lock()
+			isLeader := rf.state == LEADER
+			rf.mu.Unlock()
 
-		<-ticker.C
+			if isLeader {
+				rf.sendHeartbeats()
+			} else {
+				// No longer leader - stop sending heartbeats
+				log.Info().Msgf("[%d] NOT LEADER - STOP SENDING HEARTBEATS", rf.me)
 
-		rf.mu.Lock()
-		isLeader := rf.state == LEADER
-		rf.mu.Unlock()
+				ticker.Stop()
+				return
+			}
 
-		if isLeader {
-			rf.sendHeartbeats()
-		} else {
-			// No longer leader - stop sending heartbeats
-			log.Info().Msgf("[%d] NOT LEADER - STOP SENDING HEARTBEATS", rf.me)
-
-			ticker.Stop()
+		case <-rf.ctx.Done():
 			return
 		}
 	}
@@ -508,6 +527,8 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+
+	rf.ctx, rf.cancel = context.WithCancel(context.Background())
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

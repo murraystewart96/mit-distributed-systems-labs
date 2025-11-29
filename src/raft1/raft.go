@@ -9,6 +9,7 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"context"
 	"math/rand"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 	"6.5840/raftapi"
 	tester "6.5840/tester1"
@@ -89,13 +91,21 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	if err := e.Encode(rf.currentTerm); err != nil {
+		log.Fatal().Err(err).Msg("failed to encode current term")
+	}
+	if err := e.Encode(rf.votedFor); err != nil {
+		log.Fatal().Err(err).Msg("failed to encode voted for")
+	}
+	if err := e.Encode(rf.log); err != nil {
+		log.Fatal().Err(err).Msg("failed to encode log")
+	}
+
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -104,18 +114,25 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var votedFor int
+	var currentTerm int
+	var tempLog []Log
+
+	if err := d.Decode(&currentTerm); err != nil {
+		log.Fatal().Err(err).Msg("failed to decode current term")
+	}
+	if err := d.Decode(&votedFor); err != nil {
+		log.Fatal().Err(err).Msg("failed to decode voted for")
+	}
+	if err := d.Decode(&tempLog); err != nil {
+		log.Fatal().Err(err).Msg("failed to decode log")
+	}
+
+	rf.votedFor = votedFor
+	rf.currentTerm = currentTerm
+	rf.log = tempLog
 }
 
 // how many bytes in Raft's persisted log?
@@ -187,6 +204,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.state = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 
 	if rf.votedFor == -1 || args.CandidateID == rf.votedFor {
@@ -205,6 +223,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			log.Info().Msgf("[%d] voted for server %d", rf.me, args.CandidateID)
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
+			rf.persist()
 			// maybe reset timer
 		}
 	}
@@ -322,6 +341,7 @@ func (rf *Raft) startElection(done chan struct{}) {
 		// Increment current term and vote for self
 		rf.currentTerm++
 		rf.votedFor = rf.me
+		rf.persist()
 
 		log.Info().Msgf("[%d] starting election for term %d", rf.me, rf.currentTerm)
 
@@ -344,6 +364,7 @@ func (rf *Raft) startElection(done chan struct{}) {
 				rf.mu.Lock()
 				rf.votedFor = -1
 				isCandidate = rf.state == CANDIDATE
+				rf.persist()
 
 				rf.mu.Unlock()
 
@@ -359,16 +380,19 @@ func (rf *Raft) startElection(done chan struct{}) {
 					rf.state = LEADER
 					isCandidate = false
 
+					// Init followers nextIndices
+					for i := range rf.nextIndex {
+						rf.nextIndex[i] = len(rf.log)
+						rf.matchIndex[i] = -1
+					}
+
 					// Start sending heartbeats
 					go rf.startHeartbeat()
 
 					electionOver = true
 					rf.votedFor = -1
+					rf.persist()
 
-					// Init followers nextIndices
-					for i := range rf.nextIndex {
-						rf.nextIndex[i] = len(rf.log)
-					}
 				}
 
 				rf.mu.Unlock()
@@ -420,11 +444,13 @@ func (rf *Raft) requestVotes(ctx context.Context, voteCh chan struct{}) {
 				}
 
 				rf.mu.Lock()
-				defer rf.mu.Unlock()
 
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
+					rf.persist()
 				}
+
+				rf.mu.Unlock()
 			}(server, voteCh)
 		}
 	}

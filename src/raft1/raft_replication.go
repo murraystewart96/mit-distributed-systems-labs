@@ -45,6 +45,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 			rf.log = rf.log[:args.PrevLogIndex]
 
+			rf.persist()
+
 			return
 		} else {
 			// Matching log terms
@@ -82,6 +84,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 						nextIndex++
 					}
 				}
+
+				rf.persist()
 			}
 
 			// Check if logs needs to be committed
@@ -137,7 +141,11 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Command: command,
 	})
 
-	//log.Info().Msgf("[%d] Appending entry %v at index %d", rf.me, command, len(rf.log)-1)
+	rf.persist()
+
+	rf.readPersist(rf.persister.ReadRaftState())
+
+	log.Info().Msgf("[%d] Appending entry %v at index %d", rf.me, command, len(rf.log)-1)
 
 	// Send append requests to followers
 	go rf.appendEntries()
@@ -152,13 +160,10 @@ func (rf *Raft) appendEntries() {
 
 	rf.mu.Unlock()
 
-	// Channel for replication acknowledgements
-	ackCh := make(chan struct{})
-
 	// Send latest logs to each server
 	for server := range rf.peers {
 		if server != rf.me {
-			go func(server, commandIndex int, ackCh chan struct{}) {
+			go func(server, commandIndex int) {
 				rf.mu.Lock()
 				nextIndex := rf.nextIndex[server]
 				rf.mu.Unlock()
@@ -179,12 +184,16 @@ func (rf *Raft) appendEntries() {
 						return
 					}
 
+					// Create copy of entries from log slice
+					entries := make([]Log, len(rf.log[nextIndex:]))
+					copy(entries, rf.log[nextIndex:])
+
 					args := &AppendEntriesArgs{
 						Term:         rf.currentTerm,
 						LeaderID:     rf.me,
 						PrevLogIndex: nextIndex - 1,
 						PrevLogTerm:  rf.log[nextIndex-1].Term,
-						Entries:      rf.log[nextIndex:],
+						Entries:      entries,
 						LeaderCommit: rf.commitIndex,
 					}
 					rf.mu.Unlock()
@@ -243,20 +252,19 @@ func (rf *Raft) appendEntries() {
 							}
 
 							if lastIndex == -1 {
-								//log.Info().Msgf("[%d] LEADER Mismatching entry - leader DOES NOT contain term %d -> next index %d", rf.me, reply.XTerm, reply.XIndex)
 								// Leader doesn't contain mismatching entry
 								nextIndex = reply.XIndex
 							} else {
-								//log.Info().Msgf("[%d] LEADER Mismatching entry - leader CONTAINS term %d FOLLOWE contains %d -> next index %d", rf.me, args.PrevLogTerm, reply.XTerm, lastIndex)
 								// Leader contains mismatching entry
 								nextIndex = lastIndex
 							}
-
 						}
 					} else {
 						log.Info().Msgf("[%d] Append entries successful to %d", rf.me, server)
 
 						rf.mu.Lock()
+						defer rf.mu.Unlock()
+
 						// Update follower's next and match index
 						// Guard against old commands being processed
 						if rf.nextIndex[server] < commandIndex+1 {
@@ -264,58 +272,39 @@ func (rf *Raft) appendEntries() {
 						}
 						if rf.matchIndex[server] < commandIndex {
 							rf.matchIndex[server] = commandIndex
+
+							// Check for highest commit index
+							for i := range len(rf.peers) {
+								if i != rf.me {
+									if rf.matchIndex[i] > commandIndex {
+										commandIndex = rf.matchIndex[i]
+									}
+								}
+							}
+
+							// Check if commit index has been replicated on a majority of servers
+							replications := 1
+							commitIndex := commandIndex
+							for i := range len(rf.peers) {
+								if i != rf.me {
+									if rf.matchIndex[i] == commitIndex {
+										replications++
+									}
+								}
+							}
+
+							if replications > (len(rf.peers)/2) && commitIndex > rf.commitIndex {
+								// Signal to commit worker
+								rf.mu.Unlock()
+								rf.commitCh <- commitIndex
+								rf.mu.Lock()
+							}
 						}
-
-						// Here we should check if majority of servers have replicated
-						// Signal to commit worker
-
-						// Acknowledge successful replication
-						rf.mu.Unlock()
-						ackCh <- struct{}{}
 					}
 				}
-			}(server, commandIndex, ackCh)
+			}(server, commandIndex)
 		}
 	}
-
-	replicationCount := 1
-
-	// Spin off goroutine to wait for acknowledgements from followers (maybe have a timeout)
-	go func(ackCh chan struct{}, commandIndex int) {
-		//
-		for range ackCh { // TODO: Maybe we want to exit this loop if we are no longer leader - think of goroutine leakage - also do we need to consume all acks??
-			replicationCount++
-
-			if replicationCount > (len(rf.peers) / 2) {
-				// Replicated on majority - apply/commit entries
-				log.Info().Msgf("[%d] Entry at index %d has been replicated on majority of servers", rf.me, commandIndex)
-
-				// Commit all preceding entires in leaders log
-
-				// Apply command and any previously unapplied commands
-				rf.mu.Lock()
-
-				if rf.state == FOLLOWER { // MOVE TO TOP OF LOOP
-					rf.mu.Unlock()
-					log.Info().Msgf("[%d] BLA BLA BLA %d", rf.me, commandIndex)
-
-					return
-				}
-
-				log.Info().Msgf("[%d] leader committing entry at index %d", rf.me, commandIndex)
-
-				// Update commitIndex before signalling commit worker
-				if commandIndex > rf.commitIndex {
-					rf.mu.Unlock()
-					rf.commitCh <- commandIndex // COND MIGHT BE BETTER // SIGNAL HERE
-				} else {
-					rf.mu.Unlock()
-				}
-
-				break
-			}
-		}
-	}(ackCh, commandIndex)
 }
 
 func (rf *Raft) logCommitWorker() {
@@ -323,8 +312,6 @@ func (rf *Raft) logCommitWorker() {
 		select {
 		case commitIndex := <-rf.commitCh:
 			rf.mu.Lock()
-
-			// CHECK WHAT THE HIGHEST REPLICATED
 
 			//log.Info().Msgf("[%d] LOG - %v", rf.me, rf.log)
 
@@ -354,6 +341,5 @@ func (rf *Raft) logCommitWorker() {
 		case <-rf.ctx.Done():
 			return
 		}
-		//}
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ***** MY CODE START *****
+
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
@@ -179,7 +181,7 @@ func (rf *Raft) appendEntries() {
 					}
 
 					// Exit if no longer leader
-					if rf.state != LEADER { // TODO: review if this works or can be improved
+					if rf.state != LEADER {
 						rf.mu.Unlock()
 						return
 					}
@@ -260,7 +262,7 @@ func (rf *Raft) appendEntries() {
 							}
 						}
 					} else {
-						log.Info().Msgf("[%d] Append entries successful to %d", rf.me, server)
+						//log.Info().Msgf("[%d] Append entries successful to %d", rf.me, server)
 
 						rf.mu.Lock()
 						defer rf.mu.Unlock()
@@ -315,7 +317,7 @@ func (rf *Raft) logCommitWorker() {
 
 			//log.Info().Msgf("[%d] LOG - %v", rf.me, rf.log)
 
-			log.Info().Msgf("[%d] COMMITTING from [%d] to [%d]", rf.me, rf.lastApplied+1, commitIndex)
+			//log.Info().Msgf("[%d] COMMITTING from [%d] to [%d]", rf.me, rf.lastApplied+1, commitIndex)
 
 			// Commit logs
 			for i := rf.lastApplied + 1; i <= commitIndex; i++ {
@@ -325,7 +327,6 @@ func (rf *Raft) logCommitWorker() {
 					CommandIndex: i,
 				}
 
-				//
 				//log.Info().Msgf("[%d] COMMITTING cmd(%v) entry at %d", rf.me, applyMsg.Command, i)
 
 				rf.mu.Unlock()
@@ -343,3 +344,5 @@ func (rf *Raft) logCommitWorker() {
 		}
 	}
 }
+
+// ***** MY CODE END *****

@@ -25,6 +25,8 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// ***** MY CODE START *****
+
 type State int
 
 const (
@@ -33,6 +35,13 @@ const (
 	FOLLOWER
 )
 
+type Log struct {
+	Term    int
+	Command any
+}
+
+// ***** MY CODE END *****
+
 // A Go object implementing a single Raft peer.
 type Raft struct {
 	mu        *sync.Mutex         // Lock to protect shared access to this peer's state
@@ -40,12 +49,10 @@ type Raft struct {
 	persister *tester.Persister   // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
-	ctx       context.Context
-	cancel    context.CancelFunc
 
-	// Your data here (3A, 3B, 3C).
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
+	// ***** MY CODE START *****
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	heartbeatCh chan struct{}
 	commitCh    chan int
@@ -65,12 +72,10 @@ type Raft struct {
 	// Volatile state on leader
 	nextIndex  []int
 	matchIndex []int
+	// ***** MY CODE END *****
 }
 
-type Log struct {
-	Term    int
-	Command any
-}
+// ***** MY CODE START *****
 
 // return currentTerm and whether this server
 // believes it is the leader.
@@ -78,7 +83,6 @@ func (rf *Raft) GetState() (int, bool) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	// Your code here (3A).
 	return rf.currentTerm, rf.state == LEADER
 }
 
@@ -90,7 +94,6 @@ func (rf *Raft) GetState() (int, bool) {
 // after you've implemented snapshots, pass the current snapshot
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
-	// Your code here (3C).
 	w := new(bytes.Buffer)
 	e := labgob.NewEncoder(w)
 
@@ -113,7 +116,6 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (3C).
 	r := bytes.NewBuffer(data)
 	d := labgob.NewDecoder(r)
 	var votedFor int
@@ -135,6 +137,8 @@ func (rf *Raft) readPersist(data []byte) {
 	rf.log = tempLog
 }
 
+// ***** MY CODE END *****
+
 // how many bytes in Raft's persisted log?
 func (rf *Raft) PersistBytes() int {
 	rf.mu.Lock()
@@ -150,6 +154,8 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 
 }
+
+// ***** MY CODE START *****
 
 type AppendEntriesArgs struct {
 	Term         int
@@ -172,7 +178,6 @@ type AppendEntriesReply struct {
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
 type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
 	Term         int
 	CandidateID  int
 	LastLogIndex int
@@ -182,13 +187,12 @@ type RequestVoteArgs struct {
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
-	// Your data here (3A).
 	Term        int
 	VoteGranted bool
 }
 
+// example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
@@ -224,10 +228,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 			rf.votedFor = args.CandidateID
 			rf.persist()
-			// maybe reset timer
 		}
 	}
 }
+
+// ***** MY CODE END *****
 
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
@@ -277,7 +282,6 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 // should call killed() to check whether it should stop.
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
-	// Your code here, if desired.
 	rf.cancel()
 }
 
@@ -285,6 +289,8 @@ func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
 }
+
+// ***** MY CODE START *****
 
 // ticker runs an election timer. The timer is reset whenever a leader heartbeat is received.
 // If the timer expires and the server is a FOLLOWER the server starts an election - at which point the select will block until
@@ -294,7 +300,6 @@ func (rf *Raft) ticker() {
 	electionDone := make(chan struct{})
 
 	for rf.killed() == false {
-		// Your code here (3A)
 		select {
 		case <-electionTimer.C:
 			// timeout reached -> start election
@@ -505,8 +510,6 @@ func (rf *Raft) sendHeartbeats() {
 			}
 			reply := &AppendEntriesReply{}
 
-			//log.Info().Msgf("[%d] sending heartbeats to %d", rf.me, i)
-
 			go func(server int) {
 				ok := rf.sendAppendEntries(server, args, reply)
 				if !ok {
@@ -522,6 +525,8 @@ func randTimeout() time.Duration {
 	ms := rand.Intn(501) + 1000
 	return time.Duration(ms) * time.Millisecond
 }
+
+// ***** MY CODE END *****
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -539,7 +544,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.persister = persister
 	rf.me = me
 
-	// Your initialization code here (3A, 3B, 3C).
+	// ***** MY CODE START *****
 	rf.state = FOLLOWER
 	rf.heartbeatCh = make(chan struct{})
 	rf.commitCh = make(chan int)
@@ -559,6 +564,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.logCommitWorker()
+	// ***** MY CODE END *****
 
 	return rf
 }

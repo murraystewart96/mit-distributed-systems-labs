@@ -66,7 +66,4 @@ go test -run 3B
 
 # Part 3C — persistence
 go test -run 3C
-
-# All parts
-go test
 ```
